@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#f6f0e8">
+<title>Utta — аксессуары для собак</title>
+<style>
+:root{--bg:#f7f2ec;--card:#fffdf9;--text:#262321;--muted:#817970;--line:#e7ded4;--accent:#2d2926}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",sans-serif}
+.wrap{max-width:720px;margin:auto;padding:18px 16px 100px}.brand{text-align:center;padding:20px 0 12px}
+.logo{font-size:34px;letter-spacing:4px;font-weight:700}.tag{color:var(--muted);font-size:14px;margin-top:5px}
+.hero{background:var(--card);border:1px solid var(--line);border-radius:26px;padding:22px;margin:10px 0 20px}
+.hero h1{font-size:26px;margin:0 0 8px}.hero p{color:var(--muted);line-height:1.45;margin:0}
+.product{background:var(--card);border:1px solid var(--line);border-radius:24px;overflow:hidden;margin-bottom:18px}
+.photo{height:260px;background:linear-gradient(145deg,#eee4da,#d9cec3);display:flex;align-items:center;justify-content:center;font-size:100px}
+.info{padding:18px}.name{font-size:22px;font-weight:700}.price{font-size:20px;font-weight:700;margin-top:7px}
+.label{font-size:13px;color:var(--muted);margin:18px 0 8px}.colors{display:flex;gap:9px;flex-wrap:wrap}
+.color{border:1px solid var(--line);background:#fff;padding:10px 13px;border-radius:14px;font-size:14px;cursor:pointer}
+.color.active{border:2px solid var(--accent);padding:9px 12px;font-weight:600}
+button{font:inherit}.add{width:100%;margin-top:18px;border:0;border-radius:16px;background:var(--accent);color:#fff;padding:15px;font-weight:700;font-size:16px}
+.cart{position:fixed;left:16px;right:16px;bottom:14px;max-width:688px;margin:auto;background:var(--accent);color:#fff;border-radius:18px;padding:14px 17px;display:flex;justify-content:space-between;align-items:center;box-shadow:0 8px 30px #0002;cursor:pointer}
+.cart small{opacity:.75}.cart b{font-size:15px}
+.modal{display:none;position:fixed;inset:0;background:#0007;z-index:5;padding:20px;overflow:auto}.sheet{max-width:620px;margin:30px auto;background:var(--card);border-radius:24px;padding:20px}
+.close{float:right;border:0;background:#eee6de;border-radius:50%;width:38px;height:38px;font-size:20px}.sheet h2{margin-top:6px}
+.row{display:flex;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--line)}input{width:100%;padding:13px;border:1px solid var(--line);border-radius:13px;background:white;font-size:16px;margin-top:8px}
+.send{width:100%;border:0;border-radius:16px;background:#2688ff;color:white;padding:15px;font-weight:700;font-size:16px;margin-top:16px}
+.note{font-size:12px;color:var(--muted);line-height:1.4;margin-top:10px}
+.empty{color:var(--muted);padding:15px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="brand"><div class="logo">UTTA</div><div class="tag">стильные аксессуары для собак 🐾</div></div>
+  <section class="hero">
+    <h1>Красивые прогулки начинаются с Utta</h1>
+    <p>Выбирайте поводок, цвет и оформляйте заказ прямо внутри Telegram.</p>
+  </section>
+
+  <section class="product">
+    <div class="photo">🐕‍🦺</div>
+    <div class="info">
+      <div class="name">Поводок Utta</div>
+      <div class="price">2 000 ₽</div>
+      <div class="label">Цвет</div>
+      <div class="colors">
+        <button class="color active" data-color="Розовый">🌸 Розовый</button>
+        <button class="color" data-color="Голубой">🩵 Голубой</button>
+        <button class="color" data-color="Салатовый">🍏 Салатовый</button>
+      </div>
+      <button class="add" id="add">Добавить в корзину</button>
+    </div>
+  </section>
+</div>
+
+<div class="cart" id="cartBar"><div><b>🛒 Корзина</b><br><small id="cartSummary">Пока пусто</small></div><b id="cartTotal">0 ₽</b></div>
+
+<div class="modal" id="modal">
+  <div class="sheet">
+    <button class="close" id="close">×</button>
+    <h2>Оформление заказа</h2>
+    <div id="items"></div>
+    <label class="label">Ваше имя<input id="name" placeholder="Например, Анна"></label>
+    <label class="label">Телефон<input id="phone" type="tel" placeholder="+7 ..."></label>
+    <label class="label">Комментарий / адрес доставки<input id="address" placeholder="Адрес или пункт выдачи"></label>
+    <button class="send" id="send">Отправить заказ в Telegram</button>
+    <div class="note">На этом этапе заказ формируется в сообщении Telegram. После подключения серверной части можно добавить автоматическое подтверждение и онлайн-оплату.</div>
+  </div>
+</div>
+
+<script>
+const BOT="Uttashop_bot";
+let selected="Розовый";
+let cart=[];
+document.querySelectorAll(".color").forEach(b=>b.onclick=()=>{document.querySelectorAll(".color").forEach(x=>x.classList.remove("active"));b.classList.add("active");selected=b.dataset.color});
+document.getElementById("add").onclick=()=>{cart.push({name:"Поводок Utta",color:selected,price:2000});update()};
+function update(){
+ const count=cart.length,total=cart.reduce((s,x)=>s+x.price,0);
+ document.getElementById("cartSummary").textContent=count?`${count} шт. · ${cart.map(x=>x.color).join(", ")}`:"Пока пусто";
+ document.getElementById("cartTotal").textContent=total.toLocaleString("ru-RU")+" ₽";
+}
+document.getElementById("cartBar").onclick=()=>{
+ document.getElementById("modal").style.display="block";
+ document.getElementById("items").innerHTML=cart.length?cart.map((x,i)=>`<div class="row"><span>Поводок Utta · ${x.color}</span><b>${x.price.toLocaleString("ru-RU")} ₽</b></div>`).join(""):"<div class='empty'>Корзина пуста. Добавьте поводок.</div>";
+};
+document.getElementById("close").onclick=()=>document.getElementById("modal").style.display="none";
+document.getElementById("send").onclick=()=>{
+ if(!cart.length){alert("Сначала добавьте товар в корзину.");return}
+ const name=document.getElementById("name").value.trim(),phone=document.getElementById("phone").value.trim(),address=document.getElementById("address").value.trim();
+ if(!name||!phone){alert("Введите имя и телефон.");return}
+ const total=cart.reduce((s,x)=>s+x.price,0);
+ const lines=["🛍 Заказ Utta","",...cart.map((x,i)=>`${i+1}. ${x.name} — ${x.color} — ${x.price} ₽`),"",`Итого: ${total} ₽`,`Имя: ${name}`,`Телефон: ${phone}`,`Доставка: ${address||"уточнить"}`];
+ const text=lines.join("\n");
+ navigator.clipboard?.writeText(text).catch(()=>{});
+ location.href=`https://t.me/${BOT}?start=order`;
+};
+update();
+</script>
+</body>
+</html>
