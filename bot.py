@@ -4,6 +4,9 @@ import os
 import secrets
 from datetime import datetime
 
+import psycopg2
+from psycopg2.extras import RealDictCursor
+
 from aiogram import Bot, Dispatcher, executor, types
 from aiogram.types import (
     ReplyKeyboardMarkup,
@@ -22,6 +25,7 @@ from aiogram.dispatcher.filters.state import State, StatesGroup
 
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID_RAW = os.getenv("ADMIN_ID")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not TOKEN:
     raise RuntimeError("BOT_TOKEN is not set")
@@ -29,22 +33,14 @@ if not TOKEN:
 if not ADMIN_ID_RAW:
     raise RuntimeError("ADMIN_ID is not set")
 
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL is not set")
+
+
 try:
     ADMIN_ID = int(ADMIN_ID_RAW)
 except ValueError:
     raise RuntimeError("ADMIN_ID must be a number")
-
-
-# Render automatically provides this variable.
-RENDER_URL = os.getenv(
-    "RENDER_EXTERNAL_URL",
-    "https://uttashop.onrender.com"
-).rstrip("/")
-
-PORT = int(os.getenv("PORT", "10000"))
-
-WEBHOOK_PATH = "/telegram/webhook"
-WEBHOOK_URL = f"{RENDER_URL}{WEBHOOK_PATH}"
 
 
 # ============================================================
@@ -91,10 +87,187 @@ COLORS = {
 
 
 # ============================================================
-# ORDERS
+# DATABASE
 # ============================================================
 
-orders = {}
+def get_connection():
+    return psycopg2.connect(DATABASE_URL)
+
+
+def init_database():
+    connection = get_connection()
+
+    try:
+        with connection.cursor() as cursor:
+
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS orders (
+                    id TEXT PRIMARY KEY,
+                    client_id BIGINT NOT NULL,
+                    client_name TEXT,
+                    username TEXT,
+                    phone TEXT,
+                    address TEXT,
+                    color TEXT,
+                    product TEXT,
+                    price INTEGER,
+                    status TEXT NOT NULL DEFAULT 'new',
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+
+            connection.commit()
+
+    finally:
+        connection.close()
+
+    logger.info("Database initialized")
+
+
+def save_order(order):
+    connection = get_connection()
+
+    try:
+        with connection.cursor() as cursor:
+
+            cursor.execute(
+                """
+                INSERT INTO orders (
+                    id,
+                    client_id,
+                    client_name,
+                    username,
+                    phone,
+                    address,
+                    color,
+                    product,
+                    price,
+                    status,
+                    created_at
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s
+                )
+                """,
+                (
+                    order["id"],
+                    order["client_id"],
+                    order["client_name"],
+                    order["username"],
+                    order["phone"],
+                    order["address"],
+                    order["color"],
+                    order["product"],
+                    order["price"],
+                    order["status"],
+                    order["created_at"],
+                )
+            )
+
+            connection.commit()
+
+    finally:
+        connection.close()
+
+
+def get_order(order_id):
+    connection = get_connection()
+
+    try:
+        with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+
+            cursor.execute(
+                """
+                SELECT *
+                FROM orders
+                WHERE id = %s
+                """,
+                (order_id,)
+            )
+
+            return cursor.fetchone()
+
+    finally:
+        connection.close()
+
+
+def update_order_status(order_id, status):
+    connection = get_connection()
+
+    try:
+        with connection.cursor() as cursor:
+
+            cursor.execute(
+                """
+                UPDATE orders
+                SET status = %s
+                WHERE id = %s
+                """,
+                (status, order_id)
+            )
+
+            connection.commit()
+
+    finally:
+        connection.close()
+
+
+def get_user_orders(client_id):
+    connection = get_connection()
+
+    try:
+        with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+
+            cursor.execute(
+                """
+                SELECT *
+                FROM orders
+                WHERE client_id = %s
+                ORDER BY created_at DESC
+                LIMIT 20
+                """,
+                (client_id,)
+            )
+
+            return cursor.fetchall()
+
+    finally:
+        connection.close()
+
+
+def get_recent_orders(limit=20):
+    connection = get_connection()
+
+    try:
+        with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+
+            cursor.execute(
+                """
+                SELECT *
+                FROM orders
+                ORDER BY created_at DESC
+                LIMIT %s
+                """,
+                (limit,)
+            )
+
+            return cursor.fetchall()
+
+    finally:
+        connection.close()
+
+
+def generate_order_id():
+
+    while True:
+
+        order_id = secrets.token_hex(4).upper()
+
+        if not get_order(order_id):
+            return order_id
 
 
 # ============================================================
@@ -102,7 +275,9 @@ orders = {}
 # ============================================================
 
 class OrderForm(StatesGroup):
+
     waiting_for_phone = State()
+
     waiting_for_address = State()
 
 
@@ -219,14 +394,9 @@ def phone_keyboard():
 # HELPERS
 # ============================================================
 
-def generate_order_id():
+def safe(value):
 
-    order_id = secrets.token_hex(4).upper()
-
-    while order_id in orders:
-        order_id = secrets.token_hex(4).upper()
-
-    return order_id
+    return html.escape(str(value))
 
 
 def user_name(user):
@@ -248,9 +418,21 @@ def username(user):
     return "не указан"
 
 
-def safe(value):
+def status_text(status):
 
-    return html.escape(str(value))
+    statuses = {
+        "new": "🆕 Новый",
+        "accepted": "✅ Принят",
+        "rejected": "❌ Отклонён",
+        "paid": "💳 Оплачен",
+        "shipped": "📦 Отправлен",
+        "completed": "🎉 Завершён",
+    }
+
+    return statuses.get(
+        status,
+        status
+    )
 
 
 # ============================================================
@@ -320,6 +502,69 @@ async def catalog(
 
 
 # ============================================================
+# ABOUT
+# ============================================================
+
+@dp.message_handler(
+    lambda message: message.text == "ℹ️ О магазине",
+    state="*"
+)
+async def about_shop(
+    message: types.Message,
+    state: FSMContext
+):
+
+    await state.finish()
+
+    text = (
+        "ℹ️ <b>О магазине UTTA</b>\n\n"
+        "UTTA — премиальные аксессуары "
+        "для собак. 🐾\n\n"
+        "Мы создаём стильные и удобные "
+        "аксессуары для маленьких и средних собак.\n\n"
+        f"🐾 Товар: <b>{PRODUCT_NAME}</b>\n"
+        "🎨 Цвета: розовый, голубой, салатовый\n"
+        "💰 Цена: <b>2 000 ₽</b>\n\n"
+        "Спасибо, что выбираете UTTA ❤️"
+    )
+
+    await message.answer(
+        text,
+        parse_mode="HTML",
+        reply_markup=main_keyboard()
+    )
+
+
+# ============================================================
+# CONTACT
+# ============================================================
+
+@dp.message_handler(
+    lambda message: message.text == "📩 Связаться",
+    state="*"
+)
+async def contact_shop(
+    message: types.Message,
+    state: FSMContext
+):
+
+    await state.finish()
+
+    text = (
+        "📩 <b>Связаться с UTTA</b>\n\n"
+        "По вопросам заказа, оплаты и доставки "
+        "напишите администратору магазина.\n\n"
+        "Мы обязательно ответим вам."
+    )
+
+    await message.answer(
+        text,
+        parse_mode="HTML",
+        reply_markup=main_keyboard()
+    )
+
+
+# ============================================================
 # COLOR
 # ============================================================
 
@@ -360,6 +605,7 @@ async def choose_color(
         )
 
     except Exception:
+
         pass
 
     await OrderForm.waiting_for_phone.set()
@@ -401,6 +647,7 @@ async def cancel_order_callback(
         )
 
     except Exception:
+
         pass
 
     await call.message.answer(
@@ -550,36 +797,50 @@ async def receive_address(
         message.from_user
     )
 
-    created_at = datetime.now().strftime(
-        "%d.%m.%Y %H:%M"
-    )
+    created_at = datetime.now()
 
-    orders[order_id] = {
-
+    order = {
         "id": order_id,
-
         "client_id": client_id,
-
         "client_name": client_name,
-
         "username": client_username,
-
         "phone": phone,
-
         "address": address,
-
         "color": color_name,
-
         "product": PRODUCT_NAME,
-
         "price": PRICE,
-
         "status": "new",
-
         "created_at": created_at,
     }
 
+    # --------------------------------------------------------
+    # SAVE TO DATABASE FIRST
+    # --------------------------------------------------------
+
+    try:
+
+        save_order(order)
+
+    except Exception as error:
+
+        logger.exception(
+            "Failed to save order: %s",
+            error
+        )
+
+        await message.answer(
+            "⚠️ Произошла ошибка при сохранении заказа.\n\n"
+            "Пожалуйста, попробуйте ещё раз.",
+            reply_markup=main_keyboard()
+        )
+
+        return
+
     await state.finish()
+
+    created_at_text = created_at.strftime(
+        "%d.%m.%Y %H:%M"
+    )
 
     # --------------------------------------------------------
     # ADMIN MESSAGE
@@ -600,7 +861,8 @@ async def receive_address(
         f"📱 <b>Телефон:</b> {safe(phone)}\n"
         f"📍 <b>Адрес:</b> {safe(address)}\n\n"
 
-        f"🕐 <b>Создан:</b> {created_at}"
+        f"📊 <b>Статус:</b> 🆕 Новый\n"
+        f"🕐 <b>Создан:</b> {created_at_text}"
     ).replace(",", " ")
 
     try:
@@ -622,10 +884,9 @@ async def receive_address(
         )
 
         await message.answer(
-            "⚠️ Не удалось отправить заказ "
-            "администратору.\n\n"
-            "Пожалуйста, попробуйте ещё раз "
-            "или свяжитесь с нами напрямую.",
+            "⚠️ Заказ сохранён, но не удалось "
+            "отправить уведомление администратору.\n\n"
+            "Мы сохранили заказ в системе.",
             reply_markup=main_keyboard()
         )
 
@@ -649,8 +910,8 @@ async def receive_address(
 
         f"💰 Сумма: <b>{PRICE:,} ₽</b>\n\n"
 
-        "Мы свяжемся с вами для "
-        "подтверждения заказа и оплаты."
+        "Мы свяжемся с вами для подтверждения "
+        "деталей и оплаты."
     ).replace(",", " ")
 
     await message.answer(
@@ -667,14 +928,14 @@ async def receive_address(
 @dp.callback_query_handler(
     lambda call: call.data.startswith("accept:")
 )
-async def accept_order(
+async def admin_accept_order(
     call: types.CallbackQuery
 ):
 
     if call.from_user.id != ADMIN_ID:
 
         await call.answer(
-            "⛔ У вас нет доступа.",
+            "Нет доступа",
             show_alert=True
         )
 
@@ -682,96 +943,61 @@ async def accept_order(
 
     order_id = call.data.split(":", 1)[1]
 
-    order = orders.get(order_id)
+    order = get_order(order_id)
 
     if not order:
 
         await call.answer(
-            "Заказ не найден.",
+            "Заказ не найден",
             show_alert=True
         )
 
         return
 
-    if order["status"] != "new":
+    update_order_status(
+        order_id,
+        "accepted"
+    )
 
-        await call.answer(
-            "Этот заказ уже обработан.",
-            show_alert=True
-        )
-
-        return
-
-    order["status"] = "accepted"
-
-    updated_text = (
-        "🟢 <b>ЗАКАЗ ПРИНЯТ</b>\n\n"
-
-        f"🔖 <b>Заказ:</b> #{safe(order['id'])}\n\n"
-
-        f"🐾 <b>Товар:</b> "
-        f"{safe(order['product'])}\n"
-
-        f"🎨 <b>Цвет:</b> "
-        f"{safe(order['color'])}\n"
-
-        f"💰 <b>Цена:</b> "
-        f"{order['price']:,} ₽\n\n"
-
-        f"👤 <b>Клиент:</b> "
-        f"{safe(order['client_name'])}\n"
-
-        f"💬 <b>Telegram:</b> "
-        f"{safe(order['username'])}\n"
-
-        f"📱 <b>Телефон:</b> "
-        f"{safe(order['phone'])}\n"
-
-        f"📍 <b>Адрес:</b> "
-        f"{safe(order['address'])}\n\n"
-
-        "✅ <b>Статус:</b> заказ принят"
-    ).replace(",", " ")
+    await call.answer(
+        "Заказ принят"
+    )
 
     try:
 
-        await call.message.edit_text(
-            updated_text,
-            parse_mode="HTML"
+        await call.message.edit_reply_markup(
+            reply_markup=None
         )
 
     except Exception:
+
         pass
 
-    await call.answer(
-        "Заказ принят ✅"
+    await call.message.answer(
+        "✅ <b>Заказ принят</b>\n\n"
+        f"🔖 Заказ: <b>#{safe(order_id)}</b>\n"
+        f"👤 Клиент: {safe(order['client_name'])}\n"
+        f"🎨 Цвет: {safe(order['color'])}\n"
+        f"💰 Сумма: <b>{order['price']:,} ₽</b>\n\n"
+        "📊 Статус: <b>Принят</b>",
+        parse_mode="HTML"
     )
 
     try:
 
         await bot.send_message(
             order["client_id"],
-            (
-                "🎉 <b>Ваш заказ принят!</b>\n\n"
-
-                f"🔖 Заказ: "
-                f"<b>#{safe(order['id'])}</b>\n"
-
-                f"🐾 {safe(order['product'])}\n"
-
-                f"🎨 {safe(order['color'])}\n"
-
-                f"💰 {order['price']:,} ₽\n\n"
-
-                "Мы свяжемся с вами для "
-                "подтверждения деталей и оплаты. 🐾"
-            ).replace(",", " "),
+            "🎉 <b>Ваш заказ принят!</b>\n\n"
+            f"🔖 Номер заказа: "
+            f"<b>#{safe(order_id)}</b>\n\n"
+            "Мы свяжемся с вами для "
+            "подтверждения оплаты и доставки.",
             parse_mode="HTML"
         )
 
     except Exception as error:
 
-        logger.error(
+        logger.warning(
             "Could not notify client: %s",
             error
         )
@@ -784,14 +1010,14 @@ async def accept_order(
 @dp.callback_query_handler(
     lambda call: call.data.startswith("reject:")
 )
-async def reject_order(
+async def admin_reject_order(
     call: types.CallbackQuery
 ):
 
     if call.from_user.id != ADMIN_ID:
 
         await call.answer(
-            "⛔ У вас нет доступа.",
+            "Нет доступа",
             show_alert=True
         )
 
@@ -799,63 +1025,21 @@ async def reject_order(
 
     order_id = call.data.split(":", 1)[1]
 
-    order = orders.get(order_id)
+    order = get_order(order_id)
 
     if not order:
 
         await call.answer(
-            "Заказ не найден.",
+            "Заказ не найден",
             show_alert=True
         )
 
         return
 
-    if order["status"] != "new":
-
-        await call.answer(
-            "Этот заказ уже обработан.",
-            show_alert=True
-        )
-
-        return
-
-    order["status"] = "rejected"
-
-    rejected_text = (
-        "🔴 <b>ЗАКАЗ ОТКЛОНЁН</b>\n\n"
-
-        f"🔖 <b>Заказ:</b> #{safe(order['id'])}\n\n"
-
-        f"🐾 <b>Товар:</b> "
-        f"{safe(order['product'])}\n"
-
-        f"🎨 <b>Цвет:</b> "
-        f"{safe(order['color'])}\n"
-
-        f"💰 <b>Цена:</b> "
-        f"{order['price']:,} ₽\n\n"
-
-        f"👤 <b>Клиент:</b> "
-        f"{safe(order['client_name'])}\n"
-
-        f"📱 <b>Телефон:</b> "
-        f"{safe(order['phone'])}\n"
-
-        f"📍 <b>Адрес:</b> "
-        f"{safe(order['address'])}\n\n"
-
-        "❌ <b>Статус:</b> заказ отклонён"
-    ).replace(",", " ")
-
-    try:
-
-        await call.message.edit_text(
-            rejected_text,
-            parse_mode="HTML"
-        )
-
-    except Exception:
-        pass
+    update_order_status(
+        order_id,
+        "rejected"
+    )
 
     await call.answer(
         "Заказ отклонён"
@@ -863,165 +1047,227 @@ async def reject_order(
 
     try:
 
+        await call.message.edit_reply_markup(
+            reply_markup=None
+        )
+
+    except Exception:
+
+        pass
+
+    await call.message.answer(
+        "❌ <b>Заказ отклонён</b>\n\n"
+        f"🔖 Заказ: <b>#{safe(order_id)}</b>\n"
+        f"👤 Клиент: {safe(order['client_name'])}\n\n"
+        "📊 Статус: <b>Отклонён</b>",
+        parse_mode="HTML"
+    )
+
+    try:
+
         await bot.send_message(
             order["client_id"],
-            (
-                "ℹ️ <b>По вашему заказу</b>\n\n"
-                f"Заказ <b>#{safe(order['id'])}</b> "
-                "не удалось принять в работу.\n\n"
-                "Пожалуйста, свяжитесь с нами "
-                "для уточнения деталей."
-            ),
+            "ℹ️ <b>По вашему заказу произошли изменения.</b>\n\n"
+            f"🔖 Номер заказа: "
+            f"<b>#{safe(order_id)}</b>\n\n"
+            "Пожалуйста, свяжитесь с нами.",
             parse_mode="HTML"
         )
 
     except Exception as error:
 
-        logger.error(
-            "Could not notify rejected client: %s",
+        logger.warning(
+            "Could not notify client: %s",
             error
         )
 
 
 # ============================================================
-# ABOUT SHOP
+# ADMIN — /orders
 # ============================================================
 
 @dp.message_handler(
-    lambda message: message.text == "ℹ️ О магазине",
+    commands=["orders"],
     state="*"
 )
-async def about_shop(
+async def admin_orders(
     message: types.Message,
     state: FSMContext
 ):
 
     await state.finish()
 
-    text = (
-        "ℹ️ <b>О магазине UTTA</b>\n\n"
+    if message.from_user.id != ADMIN_ID:
 
-        "UTTA — бренд стильных "
-        "аксессуаров для собак. 🐾\n\n"
-
-        "Мы создаём аксессуары, которые "
-        "сочетают эстетику, комфорт и качество.\n\n"
-
-        "🦮 Сейчас в продаже:\n"
-        "Премиальные поводки UTTA\n\n"
-
-        "🎨 Розовый\n"
-        "🎨 Голубой\n"
-        "🎨 Салатовый\n\n"
-
-        "💰 Цена: <b>2 000 ₽</b>"
-    )
-
-    await message.answer(
-        text,
-        parse_mode="HTML",
-        reply_markup=main_keyboard()
-    )
-
-
-# ============================================================
-# CONTACT
-# ============================================================
-
-@dp.message_handler(
-    lambda message: message.text == "📩 Связаться",
-    state="*"
-)
-async def contact_shop(
-    message: types.Message,
-    state: FSMContext
-):
-
-    await state.finish()
-
-    text = (
-        "📩 <b>Связаться с UTTA</b>\n\n"
-
-        "По вопросам заказа, оплаты и доставки "
-        "напишите администратору магазина.\n\n"
-
-        "🐾 Мы обязательно ответим."
-    )
-
-    keyboard = InlineKeyboardMarkup()
-
-    keyboard.add(
-        InlineKeyboardButton(
-            "💬 Написать администратору",
-            url="https://t.me/dr_ovakimyan"
+        await message.answer(
+            "⛔ Нет доступа."
         )
-    )
 
-    await message.answer(
-        text,
-        parse_mode="HTML",
-        reply_markup=keyboard
-    )
-
-
-# ============================================================
-# UNKNOWN MESSAGE
-# ============================================================
-
-@dp.message_handler(
-    state="*"
-)
-async def unknown_message(
-    message: types.Message,
-    state: FSMContext
-):
-
-    current_state = await state.get_state()
-
-    if current_state:
         return
-
-    await message.answer(
-        "🐾 Выберите действие в меню ниже.",
-        reply_markup=main_keyboard()
-    )
-
-
-# ============================================================
-# WEBHOOK STARTUP
-# ============================================================
-
-async def on_startup(dispatcher):
-
-    logger.info("====================================")
-    logger.info("UTTA BOT STARTING")
-    logger.info("Webhook URL: %s", WEBHOOK_URL)
-    logger.info("Admin ID: %s", ADMIN_ID)
-    logger.info("Port: %s", PORT)
-    logger.info("====================================")
-
-    # Устанавливаем webhook.
-    await bot.set_webhook(
-        WEBHOOK_URL,
-        drop_pending_updates=True
-    )
-
-    logger.info(
-        "Webhook successfully configured"
-    )
-
-
-# ============================================================
-# SHUTDOWN
-# ============================================================
-
-async def on_shutdown(dispatcher):
-
-    logger.info("UTTA BOT STOPPING")
 
     try:
 
-        await bot.delete_webhook()
+        orders = get_recent_orders(20)
+
+    except Exception as error:
+
+        logger.exception(
+            "Failed to get orders: %s",
+            error
+        )
+
+        await message.answer(
+            "⚠️ Ошибка базы данных."
+        )
+
+        return
+
+    if not orders:
+
+        await message.answer(
+            "📦 Заказов пока нет."
+        )
+
+        return
+
+    text = "📦 <b>Последние заказы</b>\n\n"
+
+    for order in orders:
+
+        created = order["created_at"]
+
+        if hasattr(created, "strftime"):
+            created = created.strftime(
+                "%d.%m.%Y %H:%M"
+            )
+
+        text += (
+            f"🔖 <b>#{safe(order['id'])}</b>\n"
+            f"🐾 {safe(order['product'])}\n"
+            f"🎨 {safe(order['color'])}\n"
+            f"💰 {order['price']:,} ₽\n"
+            f"👤 {safe(order['client_name'])}\n"
+            f"📊 {status_text(order['status'])}\n"
+            f"🕐 {created}\n\n"
+        )
+
+    await message.answer(
+        text.replace(",", " "),
+        parse_mode="HTML"
+    )
+
+
+# ============================================================
+# ADMIN — /order
+# ============================================================
+
+@dp.message_handler(
+    commands=["order"],
+    state="*"
+)
+async def admin_single_order(
+    message: types.Message,
+    state: FSMContext
+):
+
+    await state.finish()
+
+    if message.from_user.id != ADMIN_ID:
+
+        await message.answer(
+            "⛔ Нет доступа."
+        )
+
+        return
+
+    parts = message.text.split()
+
+    if len(parts) != 2:
+
+        await message.answer(
+            "Использование:\n"
+            "<code>/order 8AC32B41</code>",
+            parse_mode="HTML"
+        )
+
+        return
+
+    order_id = parts[1].replace("#", "").upper()
+
+    order = get_order(order_id)
+
+    if not order:
+
+        await message.answer(
+            "❌ Заказ не найден."
+        )
+
+        return
+
+    created = order["created_at"]
+
+    if hasattr(created, "strftime"):
+        created = created.strftime(
+            "%d.%m.%Y %H:%M"
+        )
+
+    text = (
+        "📦 <b>Информация о заказе</b>\n\n"
+        f"🔖 <b>#{safe(order['id'])}</b>\n"
+        f"🐾 Товар: {safe(order['product'])}\n"
+        f"🎨 Цвет: {safe(order['color'])}\n"
+        f"💰 Цена: <b>{order['price']:,} ₽</b>\n\n"
+        f"👤 Клиент: {safe(order['client_name'])}\n"
+        f"💬 Telegram: {safe(order['username'])}\n"
+        f"📱 Телефон: {safe(order['phone'])}\n"
+        f"📍 Адрес: {safe(order['address'])}\n\n"
+        f"📊 Статус: <b>{status_text(order['status'])}</b>\n"
+        f"🕐 Создан: {created}"
+    ).replace(",", " ")
+
+    await message.answer(
+        text,
+        parse_mode="HTML"
+    )
+
+
+# ============================================================
+# ERROR HANDLER
+# ============================================================
+
+@dp.errors_handler()
+async def errors_handler(
+    update,
+    exception
+):
+
+    logger.exception(
+        "Unhandled bot error: %s",
+        exception
+    )
+
+    return True
+
+
+# ============================================================
+# STARTUP
+# ============================================================
+
+async def on_startup(
+    dispatcher
+):
+
+    logger.info("Starting UTTA bot...")
+
+    init_database()
+
+    # Remove old webhook and pending updates.
+    # We use polling on Render.
+    try:
+
+        await bot.delete_webhook(
+            drop_pending_updates=True
+        )
 
     except Exception as error:
 
@@ -1030,8 +1276,22 @@ async def on_shutdown(dispatcher):
             error
         )
 
-    await storage.close()
-    await storage.wait_closed()
+    logger.info(
+        "UTTA bot started successfully"
+    )
+
+
+# ============================================================
+# SHUTDOWN
+# ============================================================
+
+async def on_shutdown(
+    dispatcher
+):
+
+    logger.info(
+        "Stopping UTTA bot..."
+    )
 
     await bot.session.close()
 
@@ -1042,16 +1302,9 @@ async def on_shutdown(dispatcher):
 
 if __name__ == "__main__":
 
-    logger.info(
-        "Starting UTTA webhook server..."
-    )
-
-    executor.start_webhook(
-        dispatcher=dp,
-        webhook_path=WEBHOOK_PATH,
-        on_startup=on_startup,
-        on_shutdown=on_shutdown,
+    executor.start_polling(
+        dp,
         skip_updates=True,
-        host="0.0.0.0",
-        port=PORT
+        on_startup=on_startup,
+        on_shutdown=on_shutdown
     )
