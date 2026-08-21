@@ -1,531 +1,635 @@
 import asyncio
 import os
+from datetime import datetime
 
-from aiogram import Bot, Dispatcher, F
-from aiogram.filters import CommandStart
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
+from aiogram import Bot, Dispatcher, executor, types
 from aiogram.types import (
-    Message,
-    CallbackQuery,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     ReplyKeyboardMarkup,
     KeyboardButton,
     ReplyKeyboardRemove,
 )
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
+from aiogram.dispatcher import FSMContext
+from aiogram.dispatcher.filters.state import State, StatesGroup
+from aiogram.filters import CommandStart
+
+
+# ============================================================
+# CONFIG
+# ============================================================
 
 from config import TOKEN, ADMIN_ID
 
 
-# =========================
+# ============================================================
 # BOT
-# =========================
+# ============================================================
 
 bot = Bot(token=TOKEN)
-dp = Dispatcher()
+dp = Dispatcher(bot, storage=MemoryStorage())
 
 
-# =========================
-# SHOP
-# =========================
+# ============================================================
+# PRODUCTS
+# ============================================================
 
-PRODUCT_NAME = "Премиальный поводок UTTA"
-PRODUCT_PRICE = 2000
-
-COLORS = {
-    "pink": "🩷 Розовый",
-    "blue": "💙 Голубой",
-    "green": "💚 Салатовый",
+PRODUCTS = {
+    "leash": {
+        "name": "Премиальный поводок UTTA",
+        "price": 2000,
+        "description": (
+            "Стильный поводок ручной работы для собак.\n\n"
+            "✨ Премиальный внешний вид\n"
+            "🐾 Подходит для маленьких и средних пород\n"
+            "💎 Надёжная фурнитура\n"
+            "🎨 Несколько цветов"
+        ),
+        "colors": {
+            "pink": "💗 Розовый",
+            "blue": "💙 Синий",
+            "green": "💚 Салатовый",
+        },
+    }
 }
 
 
-# =========================
-# STATES
-# =========================
+# ============================================================
+# ORDER STORAGE
+# ============================================================
+
+orders = {}
+
+order_counter = 1
+
+
+def get_next_order_number():
+    global order_counter
+
+    number = f"UTTA-{order_counter:04d}"
+    order_counter += 1
+
+    return number
+
+
+# ============================================================
+# FSM
+# ============================================================
 
 class OrderState(StatesGroup):
-    choosing_color = State()
     waiting_phone = State()
     waiting_address = State()
 
 
-# =========================
+# ============================================================
 # KEYBOARDS
-# =========================
+# ============================================================
 
 def main_menu():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🛍 Каталог",
-                    callback_data="catalog"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="ℹ️ О магазине",
-                    callback_data="about"
-                ),
-                InlineKeyboardButton(
-                    text="📩 Связаться",
-                    callback_data="contact"
-                )
-            ]
-        ]
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+
+    kb.row(
+        KeyboardButton("🛍 Каталог")
     )
+
+    kb.row(
+        KeyboardButton("ℹ️ О магазине"),
+        KeyboardButton("📩 Связаться")
+    )
+
+    return kb
 
 
 def catalog_keyboard():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🩷 Розовый",
-                    callback_data="color:pink"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="💙 Голубой",
-                    callback_data="color:blue"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="💚 Салатовый",
-                    callback_data="color:green"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="⬅️ В меню",
-                    callback_data="menu"
-                )
-            ]
-        ]
+    kb = InlineKeyboardMarkup(row_width=1)
+
+    kb.add(
+        InlineKeyboardButton(
+            "🦮 Премиальный поводок UTTA — 2 000 ₽",
+            callback_data="product:leash"
+        )
     )
 
+    return kb
 
-def product_keyboard():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🛒 Оформить заказ",
-                    callback_data="order"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🎨 Выбрать другой цвет",
-                    callback_data="catalog"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="⬅️ В меню",
-                    callback_data="menu"
-                )
-            ]
-        ]
+
+def color_keyboard():
+    kb = InlineKeyboardMarkup(row_width=1)
+
+    kb.add(
+        InlineKeyboardButton(
+            "💗 Розовый",
+            callback_data="color:pink"
+        )
     )
 
+    kb.add(
+        InlineKeyboardButton(
+            "💙 Синий",
+            callback_data="color:blue"
+        )
+    )
 
-# =========================
+    kb.add(
+        InlineKeyboardButton(
+            "💚 Салатовый",
+            callback_data="color:green"
+        )
+    )
+
+    kb.add(
+        InlineKeyboardButton(
+            "⬅️ Назад в каталог",
+            callback_data="back:catalog"
+        )
+    )
+
+    return kb
+
+
+def after_product_keyboard():
+    kb = InlineKeyboardMarkup(row_width=1)
+
+    kb.add(
+        InlineKeyboardButton(
+            "🛒 Перейти в корзину",
+            callback_data="cart"
+        )
+    )
+
+    kb.add(
+        InlineKeyboardButton(
+            "🛍 Продолжить покупки",
+            callback_data="back:catalog"
+        )
+    )
+
+    return kb
+
+
+def cart_keyboard():
+    kb = InlineKeyboardMarkup(row_width=1)
+
+    kb.add(
+        InlineKeyboardButton(
+            "📦 Оформить заказ",
+            callback_data="checkout"
+        )
+    )
+
+    kb.add(
+        InlineKeyboardButton(
+            "🛍 Вернуться в каталог",
+            callback_data="back:catalog"
+        )
+    )
+
+    return kb
+
+
+# ============================================================
 # START
-# =========================
+# ============================================================
 
-@dp.message(CommandStart())
-async def start(message: Message, state: FSMContext):
-
-    await state.clear()
+@dp.message_handler(commands=["start"])
+async def cmd_start(message: types.Message):
+    text = (
+        "🐾 <b>Добро пожаловать в UTTA!</b>\n\n"
+        "Стильные аксессуары для собак.\n\n"
+        "Выберите нужный раздел ниже 👇"
+    )
 
     await message.answer(
-        "🐶 Добро пожаловать в магазин UTTA!\n\n"
-        "Премиальные аксессуары для собак.\n\n"
-        "Выберите раздел:",
+        text,
+        parse_mode="HTML",
         reply_markup=main_menu()
     )
 
 
-# =========================
-# MENU
-# =========================
+# ============================================================
+# CATALOG
+# ============================================================
 
-@dp.callback_query(F.data == "menu")
-async def menu(
-    callback: CallbackQuery,
-    state: FSMContext
-):
+@dp.message_handler(lambda message: message.text == "🛍 Каталог")
+async def catalog(message: types.Message):
 
-    await state.clear()
+    product = PRODUCTS["leash"]
+
+    text = (
+        "🛍 <b>КАТАЛОГ UTTA</b>\n\n"
+        f"🦮 <b>{product['name']}</b>\n\n"
+        f"{product['description']}\n\n"
+        f"💰 Цена: <b>{product['price']:,} ₽</b>\n\n"
+        "Нажмите на товар, чтобы посмотреть варианты."
+    ).replace(",", " ")
+
+    await message.answer(
+        text,
+        parse_mode="HTML",
+        reply_markup=catalog_keyboard()
+    )
+
+
+# ============================================================
+# PRODUCT
+# ============================================================
+
+@dp.callback_query_handler(lambda c: c.data == "product:leash")
+async def product(callback: types.CallbackQuery):
+
+    product = PRODUCTS["leash"]
+
+    text = (
+        f"🦮 <b>{product['name']}</b>\n\n"
+        f"{product['description']}\n\n"
+        f"💰 Цена: <b>{product['price']:,} ₽</b>\n\n"
+        "🎨 Выберите цвет:"
+    ).replace(",", " ")
 
     await callback.message.edit_text(
-        "🐶 UTTA — премиальные аксессуары для собак.\n\n"
-        "Выберите раздел:",
-        reply_markup=main_menu()
+        text,
+        parse_mode="HTML",
+        reply_markup=color_keyboard()
     )
 
     await callback.answer()
 
 
-# =========================
-# CATALOG
-# =========================
+# ============================================================
+# COLOR
+# ============================================================
 
-@dp.callback_query(F.data == "catalog")
-async def catalog(
-    callback: CallbackQuery,
+@dp.callback_query_handler(lambda c: c.data.startswith("color:"))
+async def choose_color(callback: types.CallbackQuery):
+
+    color_code = callback.data.split(":")[1]
+
+    product = PRODUCTS["leash"]
+    color_name = product["colors"][color_code]
+
+    user_id = callback.from_user.id
+
+    # Создаём корзину пользователя
+    if user_id not in orders:
+        orders[user_id] = {
+            "items": [],
+            "phone": None,
+            "address": None,
+        }
+
+    orders[user_id]["items"].append({
+        "product": product["name"],
+        "color": color_name,
+        "price": product["price"],
+        "quantity": 1,
+    })
+
+    text = (
+        "✅ <b>Товар добавлен в корзину!</b>\n\n"
+        f"🦮 {product['name']}\n"
+        f"🎨 Цвет: {color_name}\n"
+        f"💰 Цена: {product['price']:,} ₽\n\n"
+        "Что хотите сделать дальше?"
+    ).replace(",", " ")
+
+    await callback.message.edit_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=after_product_keyboard()
+    )
+
+    await callback.answer("Добавлено в корзину 🛒")
+
+
+# ============================================================
+# CART
+# ============================================================
+
+@dp.callback_query_handler(lambda c: c.data == "cart")
+async def show_cart(callback: types.CallbackQuery):
+
+    user_id = callback.from_user.id
+
+    if user_id not in orders or not orders[user_id]["items"]:
+        await callback.answer("Корзина пустая", show_alert=True)
+        return
+
+    items = orders[user_id]["items"]
+
+    total = sum(
+        item["price"] * item["quantity"]
+        for item in items
+    )
+
+    text = "🛒 <b>ВАША КОРЗИНА</b>\n\n"
+
+    for index, item in enumerate(items, start=1):
+
+        text += (
+            f"{index}. 🦮 {item['product']}\n"
+            f"   🎨 {item['color']}\n"
+            f"   🔢 Количество: {item['quantity']}\n"
+            f"   💰 {item['price']:,} ₽\n\n"
+        ).replace(",", " ")
+
+    text += (
+        "━━━━━━━━━━━━━━\n"
+        f"💰 <b>ИТОГО: {total:,} ₽</b>"
+    ).replace(",", " ")
+
+    await callback.message.edit_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=cart_keyboard()
+    )
+
+    await callback.answer()
+
+
+# ============================================================
+# CHECKOUT
+# ============================================================
+
+@dp.callback_query_handler(lambda c: c.data == "checkout")
+async def checkout(callback: types.CallbackQuery):
+
+    user_id = callback.from_user.id
+
+    if user_id not in orders or not orders[user_id]["items"]:
+        await callback.answer(
+            "Корзина пустая",
+            show_alert=True
+        )
+        return
+
+    kb = ReplyKeyboardMarkup(
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
+
+    kb.add(
+        KeyboardButton(
+            "📱 Отправить номер телефона",
+            request_contact=True
+        )
+    )
+
+    await callback.message.answer(
+        "📱 <b>Оформление заказа</b>\n\n"
+        "Пожалуйста, отправьте ваш номер телефона.\n\n"
+        "Нажмите кнопку ниже 👇",
+        parse_mode="HTML",
+        reply_markup=kb
+    )
+
+    await OrderState.waiting_phone.set()
+
+    await callback.answer()
+
+
+# ============================================================
+# PHONE
+# ============================================================
+
+@dp.message_handler(
+    content_types=types.ContentType.CONTACT,
+    state=OrderState.waiting_phone
+)
+async def receive_phone(
+    message: types.Message,
     state: FSMContext
 ):
 
-    await state.set_state(OrderState.choosing_color)
+    user_id = message.from_user.id
+
+    phone = message.contact.phone_number
+
+    if user_id not in orders:
+        orders[user_id] = {
+            "items": [],
+            "phone": None,
+            "address": None,
+        }
+
+    orders[user_id]["phone"] = phone
+
+    await message.answer(
+        "Спасибо! 👍\n\n"
+        "📍 Теперь напишите <b>адрес доставки</b> "
+        "одним сообщением.\n\n"
+        "Например:\n"
+        "Москва, ул. Ленина, д. 10, кв. 25",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+    await OrderState.waiting_address.set()
+
+
+# ============================================================
+# ADDRESS
+# ============================================================
+
+@dp.message_handler(
+    state=OrderState.waiting_address,
+    content_types=types.ContentType.TEXT
+)
+async def receive_address(
+    message: types.Message,
+    state: FSMContext
+):
+
+    user_id = message.from_user.id
+
+    address = message.text.strip()
+
+    orders[user_id]["address"] = address
+
+    order_number = get_next_order_number()
+
+    items = orders[user_id]["items"]
+
+    total = sum(
+        item["price"] * item["quantity"]
+        for item in items
+    )
+
+    username = (
+        f"@{message.from_user.username}"
+        if message.from_user.username
+        else "не указан"
+    )
+
+    full_name = message.from_user.full_name
+
+    # --------------------------------------------------------
+    # ADMIN MESSAGE
+    # --------------------------------------------------------
+
+    admin_text = (
+        "🆕 <b>НОВЫЙ ЗАКАЗ UTTA</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        f"📦 <b>Заказ:</b> {order_number}\n\n"
+    )
+
+    for index, item in enumerate(items, start=1):
+
+        admin_text += (
+            f"<b>Товар {index}</b>\n"
+            f"🦮 {item['product']}\n"
+            f"🎨 Цвет: {item['color']}\n"
+            f"🔢 Количество: {item['quantity']}\n"
+            f"💰 Цена: {item['price']:,} ₽\n\n"
+        ).replace(",", " ")
+
+    admin_text += (
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"💰 <b>ИТОГО: {total:,} ₽</b>\n\n"
+        "👤 <b>Клиент</b>\n"
+        f"Имя: {full_name}\n"
+        f"Telegram: {username}\n"
+        f"ID: <code>{user_id}</code>\n"
+        f"📱 Телефон: {orders[user_id]['phone']}\n"
+        f"📍 Адрес: {address}\n"
+    ).replace(",", " ")
+
+    # --------------------------------------------------------
+    # SEND TO ADMIN
+    # --------------------------------------------------------
+
+    try:
+        await bot.send_message(
+            ADMIN_ID,
+            admin_text,
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        print("ADMIN SEND ERROR:", e)
+
+    # --------------------------------------------------------
+    # CUSTOMER CONFIRMATION
+    # --------------------------------------------------------
+
+    customer_text = (
+        "✅ <b>Заказ принят!</b>\n\n"
+        f"📦 Номер заказа: <b>{order_number}</b>\n\n"
+        f"💰 Сумма: <b>{total:,} ₽</b>\n\n"
+        "Мы свяжемся с вами для подтверждения "
+        "заказа и оплаты.\n\n"
+        "Спасибо, что выбираете <b>UTTA</b> 🐾"
+    ).replace(",", " ")
+
+    await message.answer(
+        customer_text,
+        parse_mode="HTML",
+        reply_markup=main_menu()
+    )
+
+    # --------------------------------------------------------
+    # CLEAR USER CART
+    # --------------------------------------------------------
+
+    orders[user_id] = {
+        "items": [],
+        "phone": None,
+        "address": None,
+    }
+
+    await state.finish()
+
+
+# ============================================================
+# ABOUT
+# ============================================================
+
+@dp.message_handler(lambda message: message.text == "ℹ️ О магазине")
+async def about(message: types.Message):
+
+    text = (
+        "🐾 <b>UTTA</b>\n\n"
+        "Стильные аксессуары для собак.\n\n"
+        "Мы создаём красивые и удобные аксессуары "
+        "для прогулок с вашим питомцем.\n\n"
+        "✨ Премиальный дизайн\n"
+        "🐶 Для маленьких и средних пород\n"
+        "💎 Качественная фурнитура\n"
+        "❤️ Сделано с любовью к собакам\n\n"
+        "Добро пожаловать в UTTA!"
+    )
+
+    await message.answer(
+        text,
+        parse_mode="HTML",
+        reply_markup=main_menu()
+    )
+
+
+# ============================================================
+# CONTACT
+# ============================================================
+
+@dp.message_handler(lambda message: message.text == "📩 Связаться")
+async def contact(message: types.Message):
+
+    await message.answer(
+        "📩 <b>Связаться с UTTA</b>\n\n"
+        "Если у вас есть вопрос по товару или заказу — "
+        "напишите нам.\n\n"
+        "Мы обязательно ответим 🐾",
+        parse_mode="HTML",
+        reply_markup=main_menu()
+    )
+
+
+# ============================================================
+# BACK TO CATALOG
+# ============================================================
+
+@dp.callback_query_handler(lambda c: c.data == "back:catalog")
+async def back_catalog(callback: types.CallbackQuery):
+
+    product = PRODUCTS["leash"]
+
+    text = (
+        "🛍 <b>КАТАЛОГ UTTA</b>\n\n"
+        f"🦮 <b>{product['name']}</b>\n\n"
+        f"{product['description']}\n\n"
+        f"💰 Цена: <b>{product['price']:,} ₽</b>"
+    ).replace(",", " ")
 
     await callback.message.edit_text(
-        "🛍 КАТАЛОГ UTTA\n\n"
-        f"{PRODUCT_NAME}\n"
-        f"Цена: {PRODUCT_PRICE:,} ₽\n\n"
-        "Выберите цвет:",
+        text,
+        parse_mode="HTML",
         reply_markup=catalog_keyboard()
     )
 
     await callback.answer()
 
 
-# =========================
-# COLOR
-# =========================
+# ============================================================
+# ERROR HANDLER
+# ============================================================
 
-@dp.callback_query(F.data.startswith("color:"))
-async def choose_color(
-    callback: CallbackQuery,
-    state: FSMContext
-):
+@dp.errors_handler()
+async def errors_handler(update, exception):
 
-    color_key = callback.data.split(":", 1)[1]
-    color = COLORS.get(color_key)
+    print("BOT ERROR:", exception)
 
-    if not color:
-        await callback.answer(
-            "Цвет не найден",
-            show_alert=True
-        )
-        return
+    return True
 
-    await state.update_data(color=color)
 
-    await callback.message.edit_text(
-        "🐾 ВАШ ТОВАР\n\n"
-        f"{PRODUCT_NAME}\n"
-        f"Цвет: {color}\n"
-        f"Цена: {PRODUCT_PRICE:,} ₽\n\n"
-        "Готовы оформить заказ?",
-        reply_markup=product_keyboard()
-    )
-
-    await callback.answer()
-
-
-# =========================
-# ORDER
-# =========================
-
-@dp.callback_query(F.data == "order")
-async def start_order(
-    callback: CallbackQuery,
-    state: FSMContext
-):
-
-    data = await state.get_data()
-
-    if not data.get("color"):
-        await callback.answer(
-            "Сначала выберите цвет",
-            show_alert=True
-        )
-        return
-
-    await state.set_state(OrderState.waiting_phone)
-
-    keyboard = ReplyKeyboardMarkup(
-        keyboard=[
-            [
-                KeyboardButton(
-                    text="📱 Отправить номер телефона",
-                    request_contact=True
-                )
-            ]
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True
-    )
-
-    await callback.message.answer(
-        "🛒 Оформление заказа\n\n"
-        "Нажмите кнопку ниже, чтобы отправить "
-        "номер телефона.",
-        reply_markup=keyboard
-    )
-
-    await callback.answer()
-
-
-# =========================
-# PHONE
-# =========================
-
-@dp.message(
-    OrderState.waiting_phone,
-    F.contact
-)
-async def receive_phone(
-    message: Message,
-    state: FSMContext
-):
-
-    await state.update_data(
-        phone=message.contact.phone_number
-    )
-
-    await state.set_state(
-        OrderState.waiting_address
-    )
-
-    await message.answer(
-        "Спасибо! 👍\n\n"
-        "Теперь напишите адрес доставки одним сообщением.",
-        reply_markup=ReplyKeyboardRemove()
-    )
-
-
-@dp.message(
-    OrderState.waiting_phone,
-    F.text
-)
-async def phone_text(message: Message):
-
-    await message.answer(
-        "Пожалуйста, используйте кнопку "
-        "«📱 Отправить номер телефона»."
-    )
-
-
-# =========================
-# ADDRESS
-# =========================
-
-@dp.message(
-    OrderState.waiting_address,
-    F.text
-)
-async def receive_address(
-    message: Message,
-    state: FSMContext
-):
-
-    address = message.text.strip()
-
-    if len(address) < 5:
-        await message.answer(
-            "Пожалуйста, укажите полный адрес доставки."
-        )
-        return
-
-    data = await state.get_data()
-
-    username = (
-        f"@{message.from_user.username}"
-        if message.from_user.username
-        else "без username"
-    )
-
-    order_text = (
-        "🆕 НОВЫЙ ЗАКАЗ UTTA\n\n"
-        f"Товар: {PRODUCT_NAME}\n"
-        f"Цвет: {data.get('color', 'Не указан')}\n"
-        f"Цена: {PRODUCT_PRICE:,} ₽\n\n"
-        f"Клиент: {message.from_user.full_name}\n"
-        f"Telegram: {username}\n"
-        f"Телефон: {data.get('phone', 'Не указан')}\n"
-        f"Адрес: {address}"
-    )
-
-    if ADMIN_ID:
-
-        try:
-            await bot.send_message(
-                ADMIN_ID,
-                order_text
-            )
-
-        except Exception as e:
-            print(
-                f"Ошибка отправки заказа админу: {e}"
-            )
-
-    await state.clear()
-
-    await message.answer(
-        "✅ Заказ принят!\n\n"
-        "Мы свяжемся с вами для подтверждения "
-        "и оплаты.",
-        reply_markup=main_menu()
-    )
-
-
-# =========================
-# ABOUT
-# =========================
-
-@dp.callback_query(F.data == "about")
-async def about(callback: CallbackQuery):
-
-    await callback.message.edit_text(
-        "🐶 О UTTA\n\n"
-        "UTTA — бренд стильных аксессуаров "
-        "для собак.\n\n"
-        "Сейчас доступны премиальные поводки "
-        "в трёх цветах.\n\n"
-        "Стоимость поводка — 2 000 ₽.",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="🛍 Каталог",
-                        callback_data="catalog"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="⬅️ В меню",
-                        callback_data="menu"
-                    )
-                ]
-            ]
-        )
-    )
-
-    await callback.answer()
-
-
-# =========================
-# CONTACT
-# =========================
-
-@dp.callback_query(F.data == "contact")
-async def contact(callback: CallbackQuery):
-
-    await callback.message.edit_text(
-        "📩 Связаться с UTTA\n\n"
-        "По вопросам заказа напишите нам в Telegram.",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="⬅️ В меню",
-                        callback_data="menu"
-                    )
-                ]
-            ]
-        )
-    )
-
-    await callback.answer()
-
-
-# =========================
-# RENDER HTTP SERVER
-# =========================
-
-async def handle_http_request(reader, writer):
-
-    try:
-
-        await reader.read(4096)
-
-        body = "UTTA Telegram Bot is running".encode()
-
-        response = (
-            b"HTTP/1.1 200 OK\r\n"
-            b"Content-Type: text/plain; charset=utf-8\r\n"
-            b"Content-Length: "
-            + str(len(body)).encode()
-            + b"\r\n"
-            b"Connection: close\r\n"
-            b"\r\n"
-            + body
-        )
-
-        writer.write(response)
-        await writer.drain()
-
-    except Exception as e:
-
-        print(
-            f"HTTP server error: {e}"
-        )
-
-    finally:
-
-        writer.close()
-
-        try:
-            await writer.wait_closed()
-        except Exception:
-            pass
-
-
-async def start_web_server():
-
-    port = int(
-        os.getenv(
-            "PORT",
-            "10000"
-        )
-    )
-
-    server = await asyncio.start_server(
-        handle_http_request,
-        host="0.0.0.0",
-        port=port
-    )
-
-    print(
-        f"HTTP server started on port {port}"
-    )
-
-    return server
-
-
-# =========================
-# MAIN
-# =========================
-
-async def main():
-
-    server = await start_web_server()
-
-    try:
-
-        print(
-            "UTTA Telegram Bot starting..."
-        )
-
-        await dp.start_polling(bot)
-
-    finally:
-
-        server.close()
-        await server.wait_closed()
-
-        await bot.session.close()
-
-
-# =========================
-# RUN
-# =========================
+# ============================================================
+# START BOT
+# ============================================================
 
 if __name__ == "__main__":
-    asyncio.run(main())
+
+    print("===================================")
+    print("UTTA BOT STARTED")
+    print("===================================")
+
+    executor.start_polling(
+        dp,
+        skip_updates=True
+    )
